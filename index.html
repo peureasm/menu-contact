@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>식단 자동 생성기 (Firebase 지원)</title>
+    <style>
+      :root { --bg:#f3f6fb; --card:#fff; --line:#e5e7eb; --text:#111827; --muted:#6b7280; --primary:#2563eb; --danger:#dc2626; --ok:#059669; }
+      *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Noto Sans KR",sans-serif}
+      .app{max-width:880px;margin:0 auto;padding:14px}.card{background:var(--card);border-radius:14px;padding:14px;margin-bottom:12px;box-shadow:0 3px 14px rgba(0,0,0,.06)}
+      .row{display:flex;gap:8px}.row+.row{margin-top:8px} input,select,button{font:inherit;padding:10px;border-radius:10px} input,select{border:1px solid #cfd5df;flex:1}
+      button{border:none;background:var(--primary);color:#fff;font-weight:600}button.secondary{background:#4b5563}button.danger{background:var(--danger)}button.ok{background:var(--ok)}
+      ul{list-style:none;padding:0;margin:10px 0 0} li{border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:8px}
+      .menu-grid{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center}.muted{color:var(--muted);font-size:.92rem}
+      .schedule-day{border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:8px}.date{font-weight:700;margin-bottom:4px}
+      code{font-size:.83rem;background:#f1f5f9;padding:2px 6px;border-radius:6px}
+      @media (max-width:520px){.row{flex-direction:column}}
+    </style>
+  </head>
+  <body>
+    <main class="app">
+      <section class="card">
+        <h1>식단 자동 생성기</h1>
+        <p class="muted">밥/국/반찬 분리 등록 + 1일/1주/1개월 생성 + Firebase DB 저장 지원.</p>
+      </section>
+
+      <section class="card">
+        <h2>Firebase 연결</h2>
+        <p class="muted">Firebase Console의 Web App 설정값을 입력 후 연결하세요.</p>
+        <div class="row"><input id="apiKey" placeholder="apiKey" /><input id="authDomain" placeholder="authDomain" /></div>
+        <div class="row"><input id="projectId" placeholder="projectId" /><input id="appId" placeholder="appId" /></div>
+        <div class="row"><input id="userId" placeholder="userId (예: family-a)" value="default-user" /><button id="connectFirebaseBtn" class="ok">Firebase 연결</button></div>
+        <div id="firebaseStatus" class="muted">현재 로컬 모드(localStorage)입니다.</div>
+      </section>
+
+      <section class="card">
+        <h2>기본 설정</h2>
+        <div class="row"><label>한 끼 기본 반찬 수</label><input id="defaultSideCount" type="number" min="1" max="10" value="3" /></div>
+      </section>
+
+      <section class="card">
+        <h2>메뉴 등록 (밥/국/반찬)</h2>
+        <div class="row"><select id="menuType"><option value="rice">밥</option><option value="soup">국</option><option value="side">반찬</option></select><input id="menuInput" placeholder="메뉴명 입력" /><button id="addMenuBtn">추가</button></div>
+        <div class="row"><div style="flex:1"><strong>밥</strong><ul id="riceList"></ul></div><div style="flex:1"><strong>국</strong><ul id="soupList"></ul></div><div style="flex:1"><strong>반찬</strong><ul id="sideList"></ul></div></div>
+      </section>
+
+      <section class="card">
+        <h2>식단 생성</h2>
+        <div class="row"><select id="yearSelect"></select><select id="monthSelect"></select><select id="periodSelect"><option value="1">1일분</option><option value="7">1주일분</option><option value="month" selected>1개월분</option></select></div>
+        <div class="row"><button id="generateBtn">식단 생성</button><button id="resetScheduleBtn" class="secondary">초기화</button></div>
+      </section>
+
+      <section class="card">
+        <h2>생성 결과</h2>
+        <div class="row"><input id="recallDate" type="date" /><button id="recallBtn" class="secondary">해당 날짜 메뉴 불러오기</button></div>
+        <div id="recallResult" class="muted" style="margin-top:8px"></div>
+        <div id="scheduleContainer" class="muted" style="margin-top:8px">아직 생성된 식단이 없습니다.</div>
+      </section>
+    </main>
+
+    <script type="module">
+      import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js';
+      import { getFirestore, doc, getDoc, setDoc } from 'https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js';
+
+      const MENU_KEY = 'meal-menus-v2', CONFIG_KEY = 'meal-config-v2', SCHEDULE_KEY = 'meal-schedule-v2';
+      const FIREBASE_CFG_KEY = 'firebase-config-v1';
+      const el = (id) => document.getElementById(id);
+      const refs = {
+        menuType: el('menuType'), menuInput: el('menuInput'), addMenuBtn: el('addMenuBtn'), riceList: el('riceList'), soupList: el('soupList'), sideList: el('sideList'),
+        defaultSideCount: el('defaultSideCount'), yearSelect: el('yearSelect'), monthSelect: el('monthSelect'), periodSelect: el('periodSelect'),
+        generateBtn: el('generateBtn'), resetScheduleBtn: el('resetScheduleBtn'), scheduleContainer: el('scheduleContainer'), recallDate: el('recallDate'), recallBtn: el('recallBtn'), recallResult: el('recallResult'),
+        apiKey: el('apiKey'), authDomain: el('authDomain'), projectId: el('projectId'), appId: el('appId'), userId: el('userId'), connectFirebaseBtn: el('connectFirebaseBtn'), firebaseStatus: el('firebaseStatus')
+      };
+
+      let menuState = loadJSON(MENU_KEY, { rice: [], soup: [], side: [] });
+      let config = loadJSON(CONFIG_KEY, { sideCount: 3 });
+      let firebase = { db: null, userId: null };
+      refs.defaultSideCount.value = config.sideCount;
+      restoreFirebaseFields();
+
+      function loadJSON(key, fallback) { try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; } }
+      function saveJSON(key, value) { localStorage.setItem(key, JSON.stringify(value)); }
+
+      function setupDateSelectors() {
+        const now = new Date(); const y = now.getFullYear();
+        for (let i = y - 1; i <= y + 2; i++) refs.yearSelect.add(new Option(`${i}년`, i, false, i === y));
+        for (let m = 1; m <= 12; m++) refs.monthSelect.add(new Option(`${m}월`, m, false, m === now.getMonth() + 1));
+      }
+
+      function renderMenuList(type, target) {
+        target.innerHTML = ''; const arr = menuState[type];
+        if (!arr.length) return (target.innerHTML = "<li class='muted'>없음</li>");
+        arr.forEach((name, index) => { const li = document.createElement('li'); li.className = 'menu-grid'; li.innerHTML = `<span>${name}</span><button class='danger' data-type='${type}' data-index='${index}'>삭제</button>`; target.appendChild(li); });
+      }
+      function renderMenus() { renderMenuList('rice', refs.riceList); renderMenuList('soup', refs.soupList); renderMenuList('side', refs.sideList); }
+
+      const randFrom = (arr, excluded) => { if (arr.length === 1) return arr[0]; let v = arr[Math.floor(Math.random() * arr.length)]; while (excluded && v === excluded) v = arr[Math.floor(Math.random() * arr.length)]; return v; };
+      function pickSides(count) { const sides = [...menuState.side], picked = []; while (sides.length && picked.length < count) picked.push(sides.splice(Math.floor(Math.random() * sides.length), 1)[0]); return picked; }
+      const formatDate = (y, m, d) => `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+
+      function generatePlan(year, month, period) {
+        const total = new Date(year, month, 0).getDate(); const days = period === 'month' ? total : Number(period);
+        const out = []; let prevRice = null, prevSoup = null;
+        for (let d = 1; d <= days && d <= total; d++) { const rice = randFrom(menuState.rice, prevRice); const soup = randFrom(menuState.soup, prevSoup); const sides = pickSides(config.sideCount); out.push({ date: formatDate(year, month, d), rice, soup, sides }); prevRice = rice; prevSoup = soup; }
+        return out;
+      }
+
+      function renderSchedule(payload) {
+        if (!payload?.plan?.length) { refs.scheduleContainer.className = 'muted'; refs.scheduleContainer.textContent = '아직 생성된 식단이 없습니다.'; return; }
+        refs.scheduleContainer.className = ''; refs.scheduleContainer.innerHTML = `<p class='muted'>${payload.year}년 ${payload.month}월 · ${payload.periodLabel}</p>`;
+        payload.plan.forEach((i) => { const b = document.createElement('div'); b.className = 'schedule-day'; b.innerHTML = `<div class='date'>${i.date}</div><div>🍚 밥: ${i.rice}</div><div>🥣 국: ${i.soup}</div><div>🥗 반찬: ${i.sides.join(', ') || '-'}</div>`; refs.scheduleContainer.appendChild(b); });
+      }
+
+      async function saveAll() {
+        saveJSON(MENU_KEY, menuState); saveJSON(CONFIG_KEY, config);
+        if (firebase.db && firebase.userId) {
+          await setDoc(doc(firebase.db, 'mealPlanner', firebase.userId), {
+            menuState, config, schedule: loadJSON(SCHEDULE_KEY, null), updatedAt: new Date().toISOString()
+          });
+        }
+      }
+
+      async function connectFirebase() {
+        const firebaseConfig = { apiKey: refs.apiKey.value.trim(), authDomain: refs.authDomain.value.trim(), projectId: refs.projectId.value.trim(), appId: refs.appId.value.trim() };
+        const userId = refs.userId.value.trim() || 'default-user';
+        if (!firebaseConfig.apiKey || !firebaseConfig.authDomain || !firebaseConfig.projectId || !firebaseConfig.appId) return alert('Firebase 설정값을 모두 입력해주세요.');
+
+        saveJSON(FIREBASE_CFG_KEY, { ...firebaseConfig, userId });
+        const app = initializeApp(firebaseConfig); firebase.db = getFirestore(app); firebase.userId = userId;
+        refs.firebaseStatus.textContent = `Firebase 연결됨: ${firebaseConfig.projectId} / userId: ${userId}`;
+
+        const snap = await getDoc(doc(firebase.db, 'mealPlanner', userId));
+        if (snap.exists()) {
+          const data = snap.data();
+          menuState = data.menuState || menuState;
+          config = data.config || config;
+          refs.defaultSideCount.value = config.sideCount;
+          saveJSON(MENU_KEY, menuState); saveJSON(CONFIG_KEY, config);
+          if (data.schedule) saveJSON(SCHEDULE_KEY, data.schedule);
+          renderMenus(); renderSchedule(loadJSON(SCHEDULE_KEY, null));
+        } else {
+          await saveAll();
+        }
+      }
+
+      function restoreFirebaseFields() {
+        const cfg = loadJSON(FIREBASE_CFG_KEY, null);
+        if (!cfg) return;
+        refs.apiKey.value = cfg.apiKey || ''; refs.authDomain.value = cfg.authDomain || ''; refs.projectId.value = cfg.projectId || ''; refs.appId.value = cfg.appId || ''; refs.userId.value = cfg.userId || 'default-user';
+      }
+
+      refs.addMenuBtn.addEventListener('click', async () => { const n = refs.menuInput.value.trim(), t = refs.menuType.value; if (!n) return; if (menuState[t].includes(n)) return alert('이미 등록된 메뉴입니다.'); menuState[t].push(n); refs.menuInput.value = ''; renderMenus(); await saveAll(); });
+      [refs.riceList, refs.soupList, refs.sideList].forEach((list) => list.addEventListener('click', async (e) => { const b = e.target; if (!(b instanceof HTMLButtonElement)) return; const t = b.dataset.type, idx = Number(b.dataset.index); menuState[t].splice(idx, 1); renderMenus(); await saveAll(); }));
+      refs.defaultSideCount.addEventListener('change', async () => { const v = Math.max(1, Number(refs.defaultSideCount.value) || 1); config.sideCount = v; refs.defaultSideCount.value = v; await saveAll(); });
+
+      refs.generateBtn.addEventListener('click', async () => {
+        if (!menuState.rice.length || !menuState.soup.length || menuState.side.length < config.sideCount) return alert('밥/국은 1개 이상, 반찬은 기본 반찬 수 이상 등록해주세요.');
+        const year = Number(refs.yearSelect.value), month = Number(refs.monthSelect.value), period = refs.periodSelect.value;
+        const periodLabel = period === 'month' ? '1개월분' : period === '7' ? '1주일분' : '1일분';
+        const payload = { year, month, periodLabel, plan: generatePlan(year, month, period) };
+        saveJSON(SCHEDULE_KEY, payload); renderSchedule(payload); await saveAll();
+      });
+
+      refs.resetScheduleBtn.addEventListener('click', async () => { localStorage.removeItem(SCHEDULE_KEY); refs.recallResult.textContent = ''; renderSchedule(null); await saveAll(); });
+      refs.recallBtn.addEventListener('click', () => { const selected = refs.recallDate.value, p = loadJSON(SCHEDULE_KEY, null); if (!selected || !p?.plan?.length) return (refs.recallResult.textContent = '먼저 식단을 생성해주세요.'); const f = p.plan.find((x) => x.date === selected); refs.recallResult.textContent = f ? `${f.date} → 밥:${f.rice} / 국:${f.soup} / 반찬:${f.sides.join(', ')}` : '선택한 날짜의 메뉴가 없습니다.'; });
+      refs.connectFirebaseBtn.addEventListener('click', () => connectFirebase().catch((e) => { refs.firebaseStatus.textContent = `연결 실패: ${e.message}`; }));
+
+      setupDateSelectors(); renderMenus(); renderSchedule(loadJSON(SCHEDULE_KEY, null));
+    </script>
+  </body>
+</html>
